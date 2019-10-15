@@ -1,11 +1,20 @@
-﻿using Microsoft.AspNetCore.Builder;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ApiExplorer;
+using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.Mvc.Versioning;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Stratis.Bitcoin.Features.SmartContracts.ReflectionExecutor.Controllers;
+using Stratis.SmartContracts.Core.Receipts;
+using Swashbuckle.AspNetCore.Swagger;
 using Swashbuckle.AspNetCore.SwaggerGen;
 using Swashbuckle.AspNetCore.SwaggerUI;
 
@@ -13,7 +22,7 @@ namespace Stratis.Bitcoin.Features.Api
 {
     public class Startup
     {
-        public Startup(IWebHostEnvironment env, IFullNode fullNode)
+        public Startup(IHostingEnvironment env, IFullNode fullNode)
         {
             this.fullNode = fullNode;
 
@@ -27,20 +36,13 @@ namespace Stratis.Bitcoin.Features.Api
         }
 
         private IFullNode fullNode;
+        private SwaggerUIOptions uiOptions;
 
         public IConfigurationRoot Configuration { get; }
 
         // This method gets called by the runtime. Use this method to add services to the container.
         public void ConfigureServices(IServiceCollection services)
         {
-            services.AddLogging(
-                loggingBuilder =>
-                {
-                    loggingBuilder.AddConfiguration(this.Configuration.GetSection("Logging"));
-                    loggingBuilder.AddConsole();
-                    loggingBuilder.AddDebug();
-                });
-
             // Add service and create Policy to allow Cross-Origin Requests
             services.AddCors
             (
@@ -64,8 +66,7 @@ namespace Stratis.Bitcoin.Features.Api
                 });
 
             // Add framework services.
-            services
-                .AddMvc(options =>
+            services.AddMvc(options =>
                 {
                     options.Filters.Add(typeof(LoggingActionFilter));
 
@@ -77,7 +78,7 @@ namespace Stratis.Bitcoin.Features.Api
                     }
                 })
                 // add serializers for NBitcoin objects
-                .AddNewtonsoftJson(options => Utilities.JsonConverters.Serializer.RegisterFrontConverters(options.SerializerSettings))
+                .AddJsonOptions(options => Utilities.JsonConverters.Serializer.RegisterFrontConverters(options.SerializerSettings))
                 .AddControllers(this.fullNode.Services.Features, services);
 
             // Enable API versioning.
@@ -106,26 +107,34 @@ namespace Stratis.Bitcoin.Features.Api
             services.AddTransient<IConfigureOptions<SwaggerGenOptions>, ConfigureSwaggerOptions>();
 
             // Register the Swagger generator. This will use the options we injected just above.
-            services.AddSwaggerGen();
+            services.AddSwaggerGen(c =>
+            {
+                c.SwaggerDoc("contracts", new Info { Title = "Contract API", Version = "1" });
+            });
+
+            // Hack to be able to access and modify the options object configured here in SwaggerUIContractListMiddleware.
+            services.AddSingleton(_ => this.uiOptions);
+
+            //services.AddSingleton<IReceiptRepository, PersistentReceiptRepository>();
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
-        public void Configure(IApplicationBuilder app, IWebHostEnvironment env, ILoggerFactory loggerFactory, IApiVersionDescriptionProvider provider)
+        public void Configure(IApplicationBuilder app, IHostingEnvironment env, ILoggerFactory loggerFactory, IApiVersionDescriptionProvider provider)
         {
-            app.UseStaticFiles();
-            app.UseRouting();
+            loggerFactory.AddConsole(this.Configuration.GetSection("Logging"));
+            loggerFactory.AddDebug();
 
             app.UseCors("CorsPolicy");
 
             // Register this before MVC and Swagger.
             app.UseMiddleware<NoCacheMiddleware>();
 
-            app.UseEndpoints(endpoints => {
-                endpoints.MapControllers();
-            });
+            app.UseMvc();
 
             // Enable middleware to serve generated Swagger as a JSON endpoint.
             app.UseSwagger();
+
+            app.UseMiddleware<SwaggerUIContractListMiddleware>();
 
             // Enable middleware to serve swagger-ui (HTML, JS, CSS etc.)
             app.UseSwaggerUI(c =>
@@ -137,6 +146,9 @@ namespace Stratis.Bitcoin.Features.Api
                 {
                     c.SwaggerEndpoint($"/swagger/{description.GroupName}/swagger.json", description.GroupName.ToUpperInvariant());
                 }
+
+                // Hack to be able to access and modify the options object configured here in SwaggerUIContractListMiddleware.
+                this.uiOptions = c;
             });
         }
     }
