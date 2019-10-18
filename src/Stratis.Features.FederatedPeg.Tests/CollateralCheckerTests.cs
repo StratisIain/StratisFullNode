@@ -1,23 +1,19 @@
 ﻿using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Moq;
 using NBitcoin;
-using Stratis.Bitcoin;
 using Stratis.Bitcoin.AsyncWork;
 using Stratis.Bitcoin.Configuration;
-using Stratis.Bitcoin.Consensus;
 using Stratis.Bitcoin.Controllers.Models;
 using Stratis.Bitcoin.EventBus;
 using Stratis.Bitcoin.Features.BlockStore.Controllers;
 using Stratis.Bitcoin.Features.PoA;
-using Stratis.Bitcoin.Features.PoA.Voting;
+using Stratis.Bitcoin.Features.Wallet;
 using Stratis.Bitcoin.Networks;
-using Stratis.Bitcoin.Persistence.KeyValueStores;
 using Stratis.Bitcoin.Signals;
 using Stratis.Bitcoin.Tests.Common;
 using Stratis.Bitcoin.Utilities;
@@ -31,11 +27,13 @@ namespace Stratis.Features.FederatedPeg.Tests
 {
     public class CollateralCheckerTests
     {
-        private ICollateralChecker collateralChecker;
-        private List<CollateralFederationMember> collateralFederationMembers;
+        private readonly ICollateralChecker collateralChecker;
+
+        private readonly List<CollateralFederationMember> collateralFederationMembers;
+
         private readonly int collateralCheckHeight = 2000;
 
-        private void InitializeCollateralChecker([CallerMemberName] string callingMethod = "")
+        public CollateralCheckerTests()
         {
             var loggerFactory = new LoggerFactory();
             IHttpClientFactory clientFactory = new Bitcoin.Controllers.HttpClientFactory();
@@ -44,50 +42,33 @@ namespace Stratis.Features.FederatedPeg.Tests
 
             this.collateralFederationMembers = new List<CollateralFederationMember>()
             {
-                new CollateralFederationMember(new PubKey("036317d97f911ce899fd0a360866d19f2dca5252c7960d4652d814ab155a8342de"), false, new Money(100), "addr1"),
-                new CollateralFederationMember(new PubKey("02a08d72d47b3103261163c15aa2f6b0d007e1872ad9f5fddbfbd27bdb738156e9"), false, new Money(500), "addr2"),
-                new CollateralFederationMember(new PubKey("03634c79d4e8e915cfb9f7bbef57bed32d715150836b7845b1a14c93670d816ab6"), false, new Money(100_000), "addr3")
+                new CollateralFederationMember(new PubKey("036317d97f911ce899fd0a360866d19f2dca5252c7960d4652d814ab155a8342de"), new Money(100), "addr1"),
+                new CollateralFederationMember(new PubKey("02a08d72d47b3103261163c15aa2f6b0d007e1872ad9f5fddbfbd27bdb738156e9"), new Money(500), "addr2"),
+                new CollateralFederationMember(new PubKey("03634c79d4e8e915cfb9f7bbef57bed32d715150836b7845b1a14c93670d816ab6"), new Money(100_000), "addr3")
             };
 
             List<IFederationMember> federationMembers = (network.Consensus.Options as PoAConsensusOptions).GenesisFederationMembers;
             federationMembers.Clear();
             federationMembers.AddRange(this.collateralFederationMembers);
 
-            var dataFolder = TestBase.CreateTestDir(callingMethod);
-            FederatedPegSettings fedPegSettings = FedPegTestsHelper.CreateSettings(network, KnownNetworks.StraxRegTest, dataFolder, out NodeSettings nodeSettings);
+            FederatedPegSettings fedPegSettings = FedPegTestsHelper.CreateSettings(network, out NodeSettings nodeSettings);
 
-            var counterChainSettings = new CounterChainSettings(nodeSettings, new CounterChainNetworkWrapper(Networks.Strax.Regtest()));
+            CounterChainSettings settings = new CounterChainSettings(nodeSettings, Networks.Stratis.Regtest());
             var asyncMock = new Mock<IAsyncProvider>();
             asyncMock.Setup(a => a.RegisterTask(It.IsAny<string>(), It.IsAny<Task>()));
 
             ISignals signals = new Signals(loggerFactory, new DefaultSubscriptionErrorHandler(loggerFactory));
-            var dbreezeSerializer = new DBreezeSerializer(network.Consensus.ConsensusFactory);
-            var asyncProvider = new AsyncProvider(loggerFactory, signals);
-            var finalizedBlockRepo = new FinalizedBlockInfoRepository(new LevelDbKeyValueRepository(nodeSettings.DataFolder, dbreezeSerializer), loggerFactory, asyncProvider);
-            finalizedBlockRepo.LoadFinalizedBlockInfoAsync(network).GetAwaiter().GetResult();
+            var walletSettings = new WalletSettings(nodeSettings);
+            IFederationManager fedManager = new CollateralFederationManager(nodeSettings, network, loggerFactory, new Mock<IKeyValueRepository>().Object, signals, walletSettings);
 
-            var chainIndexerMock = new Mock<ChainIndexer>();
-            var header = new BlockHeader();
-            chainIndexerMock.Setup(x => x.Tip).Returns(new ChainedHeader(header, header.GetHash(), 0));
-            var fullNode = new Mock<IFullNode>();
+            fedManager.Initialize();
 
-            IFederationManager federationManager = new FederationManager(counterChainSettings, fullNode.Object, network, nodeSettings, loggerFactory, signals);
-            var votingManager = new VotingManager(federationManager, loggerFactory, new Mock<IPollResultExecutor>().Object, new Mock<INodeStats>().Object, nodeSettings.DataFolder, dbreezeSerializer, signals, finalizedBlockRepo, network);
-            var federationHistory = new FederationHistory(federationManager, votingManager);
-            votingManager.Initialize(federationHistory);
-
-            fullNode.Setup(x => x.NodeService<VotingManager>(It.IsAny<bool>())).Returns(votingManager);
-
-            federationManager.Initialize();
-
-            this.collateralChecker = new CollateralChecker(clientFactory, counterChainSettings, federationManager, signals, network, asyncMock.Object, (new Mock<INodeLifetime>()).Object);
+            this.collateralChecker = new CollateralChecker(loggerFactory, clientFactory, settings, fedManager, signals, network, asyncMock.Object, (new Mock<INodeLifetime>()).Object);
         }
 
         [Fact]
         public async Task InitializationTakesForeverIfCounterNodeIsOfflineAsync()
         {
-            InitializeCollateralChecker();
-
             Task initTask = this.collateralChecker.InitializeAsync();
 
             await Task.Delay(10_000);
@@ -99,8 +80,6 @@ namespace Stratis.Features.FederatedPeg.Tests
         [Fact]
         public async Task CanInitializeAndCheckCollateralAsync()
         {
-            InitializeCollateralChecker();
-
             var blockStoreClientMock = new Mock<IBlockStoreClient>();
 
             var collateralData = new VerboseAddressBalancesResult(this.collateralCheckHeight + 1000)
