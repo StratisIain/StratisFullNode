@@ -15,10 +15,6 @@ namespace Stratis.SmartContracts.Core.Receipts
         /// </summary>
         Receipt Retrieve(uint256 txHash);
 
-        /// <summary>
-        /// Retrieves the receipt for each of the given IDs. It will put null in an index
-        /// if that hash is not found in the database.
-        /// </summary>
         IList<Receipt> RetrieveMany(IList<uint256> hashes);
     }
 }

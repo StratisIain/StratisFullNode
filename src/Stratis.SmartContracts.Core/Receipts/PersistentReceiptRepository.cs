@@ -42,13 +42,12 @@ namespace Stratis.SmartContracts.Core.Receipts
             }
         }
 
-        /// <inheritdoc />
         public IList<Receipt> RetrieveMany(IList<uint256> hashes)
         {
             List<Receipt> ret = new List<Receipt>();
             using (DBreeze.Transactions.Transaction t = this.engine.GetTransaction())
             {
-                foreach(uint256 hash in hashes)
+                foreach (uint256 hash in hashes)
                 {
                     ret.Add(this.GetReceipt(t, hash));
                 }
